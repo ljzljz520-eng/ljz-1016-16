@@ -17,6 +17,7 @@ from .serializers import (
     DashboardStatsSerializer
 )
 from .authentication import generate_token
+from . import captcha as captcha_svc
 
 logger = logging.getLogger(__name__)
 
@@ -34,25 +35,56 @@ def api_response(success: bool, data=None, message: str = '', code: int = 200):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def login_view(request):
-    """用户登录"""
+    """
+    用户登录（含验证码策略）
+
+    - 默认不强制验证码；同一用户名连续失败达到阈值后强制验证码
+    - 验证码错误（CAPTCHA_REQUIRED/CAPTCHA_INVALID）与账号密码错误（BAD_CREDENTIALS）
+      使用不同的 error 码和提示语，前端据此区分展示
+    """
     serializer = LoginSerializer(data=request.data)
-    
+
     if not serializer.is_valid():
         return api_response(False, message='请输入用户名和密码', code=400)
-    
-    username = serializer.validated_data['username']
+
+    username = serializer.validated_data['username'].strip()
     password = serializer.validated_data['password']
-    
+    captcha_id = request.data.get('captcha_id', '')
+    captcha_code = request.data.get('captcha_code', '')
+
+    # 1) 需要验证码时，先校验验证码（与账号密码校验严格分开）
+    if captcha_svc.is_captcha_required(username):
+        ok, error_code, error_msg = captcha_svc.verify_captcha(captcha_id, captcha_code)
+        if not ok:
+            logger.info(f"用户 {username} 登录验证码校验失败: {error_code}")
+            return api_response(False, data={
+                'error': error_code,
+                'captcha_required': True,
+            }, message=error_msg, code=400)
+
+    # 2) 校验账号密码
     user = authenticate(username=username, password=password)
-    
+
     if user is None:
-        return api_response(False, message='用户名或密码错误', code=401)
-    
+        fail_count = captcha_svc.incr_fail_count(username)
+        config = captcha_svc.get_captcha_config()
+        captcha_required = config['captcha_enabled'] and fail_count >= config['fail_threshold']
+        logger.info(f"用户 {username} 登录失败（第 {fail_count} 次），需要验证码: {captcha_required}")
+        return api_response(False, data={
+            'error': 'BAD_CREDENTIALS',
+            'fail_count': fail_count,
+            'fail_threshold': config['fail_threshold'],
+            'captcha_required': captcha_required,
+        }, message='用户名或密码错误', code=401)
+
     if not user.is_active:
         return api_response(False, message='用户已被禁用', code=403)
-    
+
+    # 3) 登录成功：清零该用户的失败计数
+    captcha_svc.reset_fail_count(username)
+
     token = generate_token(user)
-    
+
     # 记录登录日志
     OperationLog.objects.create(
         action='用户登录',
@@ -60,13 +92,94 @@ def login_view(request):
         user=user,
         ip_address=get_client_ip(request)
     )
-    
+
     logger.info(f"用户 {username} 登录成功")
-    
+
     return api_response(True, data={
         'token': token,
         'user': UserSerializer(user).data
     }, message='登录成功')
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def captcha_image(request):
+    """获取验证码图片（SVG data URI，一次性、5 分钟有效）"""
+    captcha_id, image = captcha_svc.generate_captcha()
+    return api_response(True, data={
+        'captcha_id': captcha_id,
+        'image': image,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def login_state(request):
+    """查询指定用户名的登录状态（是否需要验证码），供登录页动态展示"""
+    username = request.query_params.get('username', '').strip()
+    config = captcha_svc.get_captcha_config()
+    fail_count = captcha_svc.get_fail_count(username)
+    return api_response(True, data={
+        'captcha_enabled': config['captcha_enabled'],
+        'fail_threshold': config['fail_threshold'],
+        'fail_count': fail_count,
+        'captcha_required': config['captcha_enabled'] and fail_count >= config['fail_threshold'],
+    })
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def captcha_config(request):
+    """
+    验证码开关配置
+    - GET：任何人可查看（登录页需要据此展示）
+    - POST：修改配置，需管理员登录
+    """
+    if request.method == 'GET':
+        return api_response(True, data=captcha_svc.get_captcha_config())
+
+    # POST 需要管理员权限
+    if not (request.user and request.user.is_authenticated and request.user.is_staff):
+        return api_response(False, message='需要管理员权限才能修改验证码配置', code=403)
+
+    enabled = request.data.get('captcha_enabled')
+    threshold = request.data.get('fail_threshold')
+
+    if enabled is not None and not isinstance(enabled, bool):
+        return api_response(False, message='captcha_enabled 必须为布尔值', code=400)
+    if threshold is not None:
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            return api_response(False, message='fail_threshold 必须为整数', code=400)
+
+    config = captcha_svc.update_captcha_config(enabled=enabled, threshold=threshold)
+
+    OperationLog.objects.create(
+        action='修改验证码配置',
+        description=f"验证码开关: {'开' if config['captcha_enabled'] else '关'}，失败阈值: {config['fail_threshold']}",
+        user=request.user,
+        ip_address=get_client_ip(request)
+    )
+    logger.info(f"管理员 {request.user.username} 修改验证码配置: {config}")
+
+    return api_response(True, data=config, message='验证码配置已保存')
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def captcha_reset_fails(request):
+    """清空所有登录失败计数（管理员，用于运维处理/演示）"""
+    if not request.user.is_staff:
+        return api_response(False, message='需要管理员权限', code=403)
+    captcha_svc.reset_all_fail_counts()
+    OperationLog.objects.create(
+        action='清空登录失败计数',
+        description='管理员清空所有登录失败计数',
+        user=request.user,
+        ip_address=get_client_ip(request)
+    )
+    return api_response(True, message='登录失败计数已清空')
 
 
 @api_view(['GET'])

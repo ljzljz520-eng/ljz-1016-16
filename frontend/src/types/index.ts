@@ -97,3 +97,31 @@ export interface LoginResponse {
   token: string;
   user: User;
 }
+
+// 登录失败时后端返回的补充信息（用于区分验证码错误与账号密码错误）
+export interface LoginErrorData {
+  error?: 'BAD_CREDENTIALS' | 'CAPTCHA_REQUIRED' | 'CAPTCHA_INVALID';
+  fail_count?: number;
+  fail_threshold?: number;
+  captcha_required?: boolean;
+}
+
+// 验证码图片
+export interface CaptchaImage {
+  captcha_id: string;
+  image: string; // data:image/svg+xml;base64,... 可直接用于 <img src>
+}
+
+// 验证码开关配置
+export interface CaptchaConfig {
+  captcha_enabled: boolean;
+  fail_threshold: number;
+}
+
+// 登录状态（某用户名当前是否需要验证码）
+export interface LoginState {
+  captcha_enabled: boolean;
+  fail_threshold: number;
+  fail_count: number;
+  captcha_required: boolean;
+}

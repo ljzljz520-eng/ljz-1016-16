@@ -21,6 +21,7 @@ import { ServerStatusTable } from '@/components/ServerStatusTable';
 import { AlertList } from '@/components/AlertList';
 import { TaskList } from '@/components/TaskList';
 import { UsageChart } from '@/components/UsageChart';
+import { SecuritySettings } from '@/components/SecuritySettings';
 
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -273,6 +274,9 @@ export default function DashboardPage() {
           </CardBody>
         </Card>
       </div>
+
+      {/* 登录安全设置（验证码开关） */}
+      <SecuritySettings />
     </div>
   );
 }

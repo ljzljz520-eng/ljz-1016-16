@@ -16,10 +16,16 @@ urlpatterns = [
     path('auth/login/', views.login_view, name='login'),
     path('auth/logout/', views.logout_view, name='logout'),
     path('auth/user/', views.user_info, name='user-info'),
-    
+
+    # 登录验证码
+    path('auth/captcha/', views.captcha_image, name='captcha-image'),
+    path('auth/captcha/config/', views.captcha_config, name='captcha-config'),
+    path('auth/captcha/reset-fails/', views.captcha_reset_fails, name='captcha-reset-fails'),
+    path('auth/login-state/', views.login_state, name='login-state'),
+
     # 仪表板
     path('dashboard/stats/', views.dashboard_stats, name='dashboard-stats'),
-    
+
     # REST API
     path('', include(router.urls)),
 ]

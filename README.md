@@ -59,6 +59,13 @@
 - 实时图表展示
 - 告警和任务快览
 
+### 3. 登录验证码（验证码开关）
+- **验证码总开关**：运维配置，关闭后任何情况都不要求验证码
+- **默认不强制**：同一账号连续登录失败达到阈值（默认 3 次）后，登录页才显示验证码输入框
+- **错误区分提示**：验证码错误（`CAPTCHA_INVALID`）与账号密码错误（`BAD_CREDENTIALS`）分别提示、不同样式
+- **后端临时码**：SVG 图片验证码，一次性使用、5 分钟有效、点击可刷新
+- **登录成功即清零**失败计数；管理员可在仪表盘「登录安全设置」中开关验证码、调整阈值、清空失败计数
+
 ## 📁 项目结构
 
 ```
@@ -83,7 +90,10 @@ taskId1016/
 │       ├── views.py        # 视图
 │       ├── serializers.py  # 序列化器
 │       ├── urls.py         # 路由
+│       ├── captcha.py      # 登录验证码（开关/阈值/生成/校验）
 │       └── authentication.py # JWT 认证
+├── scripts/
+│   └── demo_captcha.sh     # 验证码流程一键演示脚本
 └── frontend/               # Next.js 前端
     ├── Dockerfile
     ├── package.json
@@ -91,8 +101,8 @@ taskId1016/
     ├── tailwind.config.js
     └── src/
         ├── app/            # Next.js App Router
-        │   ├── login/      # 登录页面
-        │   └── dashboard/  # 仪表盘页面
+        │   ├── login/      # 登录页面（含验证码输入）
+        │   └── dashboard/  # 仪表盘页面（含登录安全设置）
         ├── components/     # React 组件
         ├── lib/            # 工具库
         ├── store/          # 状态管理
@@ -119,6 +129,46 @@ taskId1016/
 ### OperationLogs (操作日志表)
 - 系统操作记录
 
+### SystemConfig (系统配置表)
+- 键值对配置，存储验证码开关（`captcha_enabled`）与失败阈值（`captcha_fail_threshold`）
+
+### LoginFailRecord (登录失败记录表)
+- 按用户名统计连续失败次数，登录成功即清零
+
+### CaptchaRecord (验证码表)
+- 后端生成的临时码：captcha_id、过期时间、一次性使用标记
+
+## 🔐 登录验证码说明
+
+### 触发流程
+1. 默认不强制验证码，直接账号密码登录
+2. 同一账号连续失败达到阈值（默认 3 次）→ 登录页自动出现验证码输入框
+3. 此后必须先通过验证码校验，再校验账号密码
+4. 登录成功 → 失败计数清零，验证码输入框消失
+
+### 错误区分
+| 场景 | HTTP | error 码 | 提示语 | 前端样式 |
+|------|------|----------|--------|----------|
+| 未填验证码 | 400 | `CAPTCHA_REQUIRED` | 请先获取并填写验证码 | 橙色警告 |
+| 验证码错误/过期 | 400 | `CAPTCHA_INVALID` | 验证码错误或已过期 | 橙色警告 |
+| 账号密码错误 | 401 | `BAD_CREDENTIALS` | 用户名或密码错误 | 红色错误 |
+
+### 验证码相关 API
+| 方法 | 路径 | 权限 | 说明 |
+|------|------|------|------|
+| GET | `/api/auth/captcha/` | 公开 | 获取验证码图片（captcha_id + SVG data URI） |
+| GET | `/api/auth/login-state/?username=x` | 公开 | 查询某账号是否需要验证码 |
+| GET | `/api/auth/captcha/config/` | 公开 | 查看验证码开关与阈值 |
+| POST | `/api/auth/captcha/config/` | 管理员 | 修改开关 / 阈值（1-10） |
+| POST | `/api/auth/captcha/reset-fails/` | 管理员 | 清空所有登录失败计数 |
+
+登录接口 `/api/auth/login/` 在需要验证码时额外接收 `captcha_id`、`captcha_code` 字段。
+
+### 生产化建议（当前为可本地演示的实现）
+- 失败计数 / 验证码目前存于业务库，高并发场景建议迁移到 Redis 并增加 IP 维度限流
+- SVG 验证码字符可被源码解析（演示脚本即如此），生产建议替换为扭曲位图或第三方验证码服务
+- 建议补充：账号锁定策略、验证码接口限流、审计告警
+
 ## 🔧 开发说明
 
 ### 本地开发（非 Docker）
@@ -140,6 +190,27 @@ npm install
 npm run dev
 ```
 
+### 本地快速演示（SQLite，无需 MySQL）
+
+仅演示登录验证码流程时，可用 SQLite 一键启动，无需 MySQL / Docker：
+
+```bash
+cd backend
+pip install Django==4.2.9 djangorestframework==3.14.0 django-cors-headers==4.3.1 PyJWT==2.8.0
+export USE_SQLITE=true
+python manage.py migrate
+python manage.py shell -c "
+from django.contrib.auth import get_user_model
+U = get_user_model()
+U.objects.filter(username='admin').exists() or U.objects.create_superuser('admin', 'admin@ops.local', 'admin123')
+"
+python manage.py runserver 8000
+```
+
+然后任选其一体验：
+- **命令行一键演示**：`./scripts/demo_captcha.sh`（自动走完整流程：失败触发 → 验证码错误/密码错误区分 → 登录成功清零 → 开关关闭/恢复）
+- **页面体验**：另开终端 `cd frontend && npm install --legacy-peer-deps && npm run dev`，访问 http://localhost:3000 ，用错误密码连续登录 3 次
+
 ### 环境变量
 
 后端环境变量（docker-compose.yml 中配置）:
@@ -149,6 +220,7 @@ npm run dev
 - `DB_USER`: 数据库用户
 - `DB_PASSWORD`: 数据库密码
 - `SECRET_KEY`: Django 密钥
+- `USE_SQLITE`: 设为 `true` 时使用 SQLite（仅本地演示，无需 MySQL）
 
 前端环境变量:
 - `NEXT_PUBLIC_API_URL`: 后端 API 地址

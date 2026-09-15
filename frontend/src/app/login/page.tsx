@@ -1,19 +1,20 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
-  Card, 
-  CardBody, 
-  Input, 
-  Button, 
+import {
+  Card,
+  CardBody,
+  Input,
+  Button,
   Checkbox,
-  Divider 
+  Divider
 } from '@heroui/react';
-import { Server, User, Lock, Eye, EyeOff, Shield } from 'lucide-react';
+import { Server, User, Lock, Eye, EyeOff, Shield, KeyRound, ShieldAlert, AlertCircle, RefreshCw } from 'lucide-react';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 import { toast } from '@/store/toast';
+import { LoginErrorData, LoginResponse } from '@/types';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
@@ -22,7 +23,18 @@ export default function LoginPage() {
   const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [mounted, setMounted] = useState(false);
-  
+
+  // 验证码相关状态
+  const [captchaRequired, setCaptchaRequired] = useState(false);
+  const [captchaId, setCaptchaId] = useState('');
+  const [captchaImage, setCaptchaImage] = useState('');
+  const [captchaCode, setCaptchaCode] = useState('');
+  const [failCount, setFailCount] = useState(0);
+  const [failThreshold, setFailThreshold] = useState(3);
+  // 错误提示：区分验证码错误与账号密码错误
+  const [errorInfo, setErrorInfo] = useState<{ type: 'auth' | 'captcha'; message: string } | null>(null);
+
+  const captchaRequiredRef = useRef(false);
   const router = useRouter();
   const { setAuth, isAuthenticated, loadFromStorage } = useAuthStore();
 
@@ -37,30 +49,108 @@ export default function LoginPage() {
     }
   }, [mounted, isAuthenticated, router]);
 
+  // 加载验证码开关配置（用于提示文案）
+  useEffect(() => {
+    api.getCaptchaConfig().then((res) => {
+      if (res.success && res.data) {
+        setFailThreshold(res.data.fail_threshold);
+      }
+    });
+  }, []);
+
+  // 刷新验证码图片
+  const refreshCaptcha = async () => {
+    const res = await api.getCaptcha();
+    if (res.success && res.data) {
+      setCaptchaId(res.data.captcha_id);
+      setCaptchaImage(res.data.image);
+      setCaptchaCode('');
+    }
+  };
+
+  const updateCaptchaRequired = (required: boolean) => {
+    captchaRequiredRef.current = required;
+    setCaptchaRequired(required);
+  };
+
+  // 用户名变化时查询该账号是否已需要验证码（防抖 400ms）
+  useEffect(() => {
+    const name = username.trim();
+    if (!name) return;
+    const timer = setTimeout(async () => {
+      const res = await api.getLoginState(name);
+      if (res.success && res.data) {
+        setFailCount(res.data.fail_count);
+        setFailThreshold(res.data.fail_threshold);
+        if (res.data.captcha_required && !captchaRequiredRef.current) {
+          refreshCaptcha();
+        }
+        updateCaptchaRequired(res.data.captcha_required);
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [username]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!username.trim()) {
       toast.warning('请输入用户名');
       return;
     }
-    
+
     if (!password.trim()) {
       toast.warning('请输入密码');
       return;
     }
 
+    if (captchaRequired && !captchaCode.trim()) {
+      toast.warning('请输入验证码');
+      return;
+    }
+
     setLoading(true);
-    
+    setErrorInfo(null);
+
     try {
-      const response = await api.login(username, password);
-      
+      const response = await api.login(
+        username.trim(),
+        password,
+        captchaRequired ? captchaId : undefined,
+        captchaRequired ? captchaCode.trim() : undefined
+      );
+
       if (response.success && response.data) {
-        setAuth(response.data.user, response.data.token);
+        const data = response.data as LoginResponse;
+        // 登录成功：重置验证码状态
+        updateCaptchaRequired(false);
+        setCaptchaId('');
+        setCaptchaImage('');
+        setCaptchaCode('');
+        setAuth(data.user, data.token);
         toast.success('登录成功，欢迎回来！');
         router.push('/dashboard');
-      } else {
-        toast.error(response.message || '登录失败');
+        return;
+      }
+
+      // 登录失败：区分验证码错误与账号密码错误
+      const errData = (response.data || {}) as LoginErrorData;
+      const isCaptchaError =
+        errData.error === 'CAPTCHA_REQUIRED' || errData.error === 'CAPTCHA_INVALID';
+
+      setErrorInfo({
+        type: isCaptchaError ? 'captcha' : 'auth',
+        message: response.message || '登录失败',
+      });
+
+      if (typeof errData.fail_count === 'number') setFailCount(errData.fail_count);
+      if (typeof errData.fail_threshold === 'number') setFailThreshold(errData.fail_threshold);
+
+      // 需要验证码时展示输入框；验证码为一次性，失败后必须刷新
+      if (errData.captcha_required) {
+        updateCaptchaRequired(true);
+        refreshCaptcha();
       }
     } catch (error) {
       toast.error('网络错误，请稍后重试');
@@ -197,6 +287,79 @@ export default function LoginPage() {
                   }}
                 />
 
+                {/* 验证码区域：连续失败达到阈值后显示 */}
+                {captchaRequired && (
+                  <div className="space-y-2">
+                    <div className="flex gap-3">
+                      <Input
+                        type="text"
+                        placeholder="请输入验证码"
+                        value={captchaCode}
+                        onValueChange={setCaptchaCode}
+                        maxLength={4}
+                        autoComplete="off"
+                        startContent={<KeyRound className="text-warning-300 w-4 h-4 flex-shrink-0" />}
+                        variant="flat"
+                        size="lg"
+                        classNames={{
+                          inputWrapper: [
+                            'bg-gray-50/80',
+                            'border border-gray-100',
+                            'hover:bg-warning-50/40 hover:border-warning-200',
+                            'focus-within:bg-white focus-within:border-warning-300',
+                            'focus-within:shadow-md focus-within:shadow-warning-100/40',
+                            'transition-all duration-300 ease-out',
+                            'group-data-[focus=true]:bg-white',
+                            'group-data-[focus=true]:border-warning-300',
+                          ].join(' '),
+                          input: 'text-gray-700 placeholder:text-gray-300 tracking-widest',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={refreshCaptcha}
+                        title="看不清？点击刷新"
+                        className="flex-shrink-0 w-[132px] h-12 rounded-xl border border-gray-200 bg-gray-50 overflow-hidden hover:border-primary-300 hover:shadow-sm transition-all duration-200 flex items-center justify-center"
+                      >
+                        {captchaImage ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={captchaImage} alt="验证码" className="w-full h-full" />
+                        ) : (
+                          <RefreshCw className="w-4 h-4 text-gray-400" />
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-xs text-warning-600 flex items-center gap-1">
+                      <ShieldAlert size={12} />
+                      连续失败 {failThreshold} 次后需完成验证码校验（当前已失败 {failCount} 次）
+                    </p>
+                  </div>
+                )}
+
+                {/* 错误提示：验证码错误与账号密码错误区分展示 */}
+                {errorInfo && (
+                  <div
+                    className={`flex items-start gap-2.5 px-4 py-3 rounded-xl text-sm border ${
+                      errorInfo.type === 'captcha'
+                        ? 'bg-warning-50 border-warning-200 text-warning-700'
+                        : 'bg-danger-50 border-danger-200 text-danger-600'
+                    }`}
+                  >
+                    {errorInfo.type === 'captcha' ? (
+                      <ShieldAlert size={16} className="flex-shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle size={16} className="flex-shrink-0 mt-0.5" />
+                    )}
+                    <div>
+                      <span className="font-semibold">
+                        {errorInfo.type === 'captcha' ? '验证码校验未通过' : '账号密码校验未通过'}
+                      </span>
+                      <span className="mx-1.5 opacity-40">|</span>
+                      <span>{errorInfo.message}</span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="pt-1">
                   <button
                     type="submit"
@@ -217,6 +380,10 @@ export default function LoginPage() {
               </form>
             </CardBody>
           </Card>
+
+          <p className="text-center text-xs text-gray-400 mt-4">
+            演示账号：admin / admin123 · 连续输错 {failThreshold} 次密码即可体验验证码流程
+          </p>
 
           <p className="text-center text-sm text-gray-400 mt-6">
             © 2024 OPS Admin. All rights reserved.

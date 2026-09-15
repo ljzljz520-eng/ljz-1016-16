@@ -115,6 +115,55 @@ class Task(models.Model):
         return self.name
 
 
+class SystemConfig(models.Model):
+    """系统配置模型（键值对，用于验证码开关等运维配置）"""
+    key = models.CharField('配置键', max_length=50, unique=True)
+    value = models.CharField('配置值', max_length=200)
+    description = models.CharField('说明', max_length=200, blank=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        db_table = 'ops_config'
+        verbose_name = '系统配置'
+        verbose_name_plural = '系统配置'
+
+    def __str__(self):
+        return f"{self.key} = {self.value}"
+
+
+class LoginFailRecord(models.Model):
+    """登录失败记录（按用户名统计连续失败次数）"""
+    username = models.CharField('用户名', max_length=150, unique=True)
+    fail_count = models.IntegerField('连续失败次数', default=0)
+    last_fail_at = models.DateTimeField('最后失败时间', auto_now=True)
+
+    class Meta:
+        db_table = 'ops_login_fail'
+        verbose_name = '登录失败记录'
+        verbose_name_plural = '登录失败记录'
+
+    def __str__(self):
+        return f"{self.username} 连续失败 {self.fail_count} 次"
+
+
+class CaptchaRecord(models.Model):
+    """验证码记录（后端生成的临时码，一次性、限时有效）"""
+    captcha_id = models.CharField('验证码ID', max_length=64, unique=True)
+    code = models.CharField('验证码', max_length=8)
+    expires_at = models.DateTimeField('过期时间')
+    is_used = models.BooleanField('是否已使用', default=False)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        db_table = 'ops_captcha'
+        verbose_name = '验证码'
+        verbose_name_plural = '验证码'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Captcha({self.captcha_id[:8]})"
+
+
 class OperationLog(models.Model):
     """操作日志模型"""
     action = models.CharField('操作', max_length=100)
